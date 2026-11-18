@@ -291,6 +291,11 @@ pub struct ConvertRequest {
     /// For an archive source that needs one. Never serialized.
     #[serde(default, skip_serializing)]
     pub archive_password: Option<ArchivePassword>,
+    /// For an `.ffpkg`: the order file data is laid out and read in, as source paths
+    /// (`ps5_dump_forge_ufs2::Options::data_order`), for a source read best front to back in
+    /// an order of its own. Ignored for every other target.
+    #[serde(default)]
+    pub data_order: Option<Vec<String>>,
 }
 
 /// One change of an in-place edit ([`ConvertRequest::edits`]), applied in order. Game paths are

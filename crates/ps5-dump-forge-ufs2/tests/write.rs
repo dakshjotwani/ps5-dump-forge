@@ -149,3 +149,80 @@ fn write_refuses_mismatches() {
     );
     std::fs::remove_file(path).unwrap();
 }
+
+/// A source that records which file each read was for, in order.
+struct Logged {
+    inner: FolderSource,
+    reads: Vec<String>,
+}
+
+impl SourceTree for Logged {
+    fn files(&self) -> &[ps5upload_fpkg::source::SourceFile] {
+        self.inner.files()
+    }
+    fn read(&mut self, path: &str) -> ps5upload_fpkg::Result<Vec<u8>> {
+        self.reads.push(path.to_string());
+        self.inner.read(path)
+    }
+    fn read_range(
+        &mut self,
+        path: &str,
+        offset: u64,
+        len: usize,
+    ) -> ps5upload_fpkg::Result<Vec<u8>> {
+        if self.reads.last().map(String::as_str) != Some(path) {
+            self.reads.push(path.to_string());
+        }
+        self.inner.read_range(path, offset, len)
+    }
+    fn empty_dirs(&self) -> &[String] {
+        self.inner.empty_dirs()
+    }
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+}
+
+/// `data_order`: file data laid out (and read) in the caller's order, unlisted files first,
+/// and the image still checks clean and reads back the same.
+#[test]
+fn data_order_is_followed() {
+    let root = scratch("order-src");
+    let _ = std::fs::remove_dir_all(&root);
+    let files: &[(&str, u64)] = &[
+        ("eboot.bin", 3 * B + 17),
+        ("a/one.bin", 13 * B + 5), // single-indirect
+        ("a/two.bin", 2 * B),
+        ("b/three.bin", 0),
+        ("b/c/four.bin", 70_000),
+        ("z.bin", 1),
+    ];
+    for (i, (p, size)) in files.iter().enumerate() {
+        let path = root.join(p);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, common::pattern(i, 0, *size as usize)).unwrap();
+    }
+    // eboot.bin last, z.bin not listed (so first), a nonexistent path ignored.
+    let order: Vec<String> = ["b/c/four.bin", "a/two.bin", "nope.bin", "a/one.bin", "b/three.bin", "eboot.bin"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut src = Logged {
+        inner: FolderSource::open(&root).unwrap(),
+        reads: Vec::new(),
+    };
+    let opts = Options {
+        data_order: Some(order),
+        ..Options::default()
+    };
+    let (img, _layout, report) = build("order", &mut src, &opts);
+    assert_eq!(report.files, files.len() as u64);
+    // Zero-length files are never read.
+    assert_eq!(
+        src.reads,
+        ["z.bin", "b/c/four.bin", "a/two.bin", "a/one.bin", "eboot.bin"]
+    );
+    let r = assert_clean(&img);
+    assert_eq!(r.files.len(), files.len());
+    compare_with_reader(&img, &mut src.inner);
+}

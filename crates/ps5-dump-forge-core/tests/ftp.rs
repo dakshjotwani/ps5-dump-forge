@@ -61,6 +61,7 @@ fn request(source: &Path, format: Format, output: &Path) -> ConvertRequest {
         delete_source: false,
         pack_profile: None,
         archive_password: None,
+        data_order: None,
     }
 }
 

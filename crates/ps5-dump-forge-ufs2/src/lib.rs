@@ -47,6 +47,13 @@ pub struct Options {
     /// Maker's mark for `fs_volname`: printable ASCII, at most 31 bytes (the field is 32,
     /// NUL-terminated); `plan` rejects anything else. `None` leaves it empty, as newfs does.
     pub maker: Option<String>,
+    /// The order file data is laid out (and read from the source) in, as paths of
+    /// `tree.files()`: for a source that can only be read front to back in an order of its
+    /// own, such as a stream. Directories come first, then the files this list leaves out in
+    /// inode order, then the listed ones in list order; paths not in the tree are ignored.
+    /// Inode numbers and directory contents don't change, only where file data sits.
+    /// `None` keeps data in inode order.
+    pub data_order: Option<Vec<String>>,
 }
 
 /// Everything `write` needs, fixed before the first file byte is read.
@@ -78,6 +85,8 @@ pub struct Layout {
     volname: [u8; ondisk::VOLNAME_LEN],
     /// Hash of the tree's file list and empty dirs as planned; `write` refuses another.
     source: u64,
+    /// Node indexes in data order: `write` visits them in this order, so it only goes forward.
+    order: Vec<u32>,
 }
 
 /// What was written.
@@ -162,10 +171,15 @@ pub fn plan(tree: &dyn SourceTree, opts: &Options, cancel: &AtomicBool) -> Resul
             Kind::File { .. } => Ok(nodes[i].size),
         })
         .collect::<Result<_>>()?;
-    let mut next = 0u64;
-    let mut too_big = Vec::new();
     for (n, size) in nodes.iter_mut().zip(sizes) {
         n.size = size;
+    }
+    let order = data_order(&nodes, tree, opts.data_order.as_deref());
+    let mut next = 0u64;
+    let mut too_big = Vec::new();
+    for &i in &order {
+        let n = &mut nodes[i as usize];
+        let size = n.size;
         n.start = next;
         let Some(slots) = bmap::total_slots(size.div_ceil(BSIZE)) else {
             too_big.push(n.name.to_string());
@@ -233,7 +247,30 @@ pub fn plan(tree: &dyn SourceTree, opts: &Options, cancel: &AtomicBool) -> Resul
         volname,
         source: fingerprint(tree),
         nodes,
+        order,
     })
+}
+
+/// Node indexes in the order their data is laid out (see [`Options::data_order`]).
+fn data_order(nodes: &[Node], tree: &dyn SourceTree, wanted: Option<&[String]>) -> Vec<u32> {
+    let all = 0..nodes.len() as u32;
+    let Some(wanted) = wanted else {
+        return all.collect();
+    };
+    let files = tree.files();
+    let mut rank: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, p) in wanted.iter().enumerate() {
+        rank.entry(p.as_str()).or_insert(i);
+    }
+    let rank_of = |i: u32| match nodes[i as usize].kind {
+        Kind::File { src } => rank.get(files[src].path.as_str()).copied(),
+        Kind::Dir { .. } => None,
+    };
+    let (mut listed, unlisted): (Vec<u32>, Vec<u32>) = all.partition(|&i| rank_of(i).is_some());
+    let (dirs, rest): (Vec<u32>, Vec<u32>) =
+        unlisted.into_iter().partition(|&i| nodes[i as usize].is_dir());
+    listed.sort_by_key(|&i| rank_of(i));
+    dirs.into_iter().chain(rest).chain(listed).collect()
 }
 
 /// The smallest newfs layout from `start` blocks up whose groups hold `need_blocks` data
@@ -307,7 +344,9 @@ pub fn write<W: Write + Seek>(
     progress(0, total);
 
     let g = &layout.geom;
-    for (i, node) in layout.nodes.iter().enumerate() {
+    for &i in &layout.order {
+        let i = i as usize;
+        let node = &layout.nodes[i];
         check_cancel(cancel)?;
         let (dir_bytes, path) = match node.kind {
             Kind::Dir { .. } => (Some(tree::dir_bytes(&layout.nodes, i)), String::new()),
