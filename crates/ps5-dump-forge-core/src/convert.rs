@@ -378,6 +378,7 @@ impl Image {
         format: Format,
         tree: &dyn SourceTree,
         info: &GameInfo,
+        data_order: Option<&[String]>,
         cancel: &AtomicBool,
     ) -> Result<Self, String> {
         match format {
@@ -404,6 +405,7 @@ impl Image {
                 let opts = ps5_dump_forge_ufs2::Options {
                     free_bytes: 0,
                     maker: maker(),
+                    data_order: data_order.map(<[String]>::to_vec),
                 };
                 ps5_dump_forge_ufs2::plan(tree, &opts, cancel)
                     .map(Self::Ffpkg)
@@ -470,7 +472,7 @@ pub(crate) fn image_size(
     info: &GameInfo,
     cancel: &AtomicBool,
 ) -> Result<u64, String> {
-    Image::plan(format, tree, info, cancel).map(|image| image.size())
+    Image::plan(format, tree, info, None, cancel).map(|image| image.size())
 }
 
 /// Free bytes an image of `size` bytes needs at its destination: 64 MiB more covers what the
@@ -921,7 +923,7 @@ pub(crate) fn convert(req: &ConvertRequest, ctx: &Ctx) -> anyhow::Result<JobRepo
     };
     let packed = measured.as_ref();
     let mut planned = |format: Format, findings: &mut Vec<String>| {
-        plan_image(format, source.as_mut(), packed, &info, ctx.cancel)
+        plan_image(format, source.as_mut(), packed, &info, req.data_order.as_deref(), ctx.cancel)
             .map_err(|e| findings.push(e))
             .ok()
     };
@@ -1565,13 +1567,14 @@ fn plan_image(
     source: &mut dyn SourceTree,
     packed: Option<&Measured>,
     info: &GameInfo,
+    data_order: Option<&[String]>,
     cancel: &AtomicBool,
 ) -> Result<Image, String> {
     let Some(m) = packed else {
-        return Image::plan(format, source, info, cancel);
+        return Image::plan(format, source, info, data_order, cancel);
     };
     let tree = (m.tree(source, 1, cancel)).map_err(|e| format!("{} packs: {e}", m.name()))?;
-    Image::plan(format, tree.as_ref(), info, cancel)
+    Image::plan(format, tree.as_ref(), info, data_order, cancel)
 }
 
 /// The output being written: a `.part` here, an image's `.part` on a paired device, or a

@@ -320,6 +320,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Cli, String> {
                     delete_source,
                     pack_profile,
                     archive_password: None,
+                    data_order: None,
                 },
                 password_stdin,
             })
